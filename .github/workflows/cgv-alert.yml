@@ -51,17 +51,17 @@ jobs:
           END_DATE: "2026-09-06"
 
         run: |
-          for i in 1 2 3 4 5
+          for i in 1 2 3 4
           do
 
             echo ""
             echo "=========================================="
-            echo "CGV 체크 $i / 5"
+            echo "CGV 체크 $i / 4"
             echo "=========================================="
 
             python monitor_cgv.py
 
-            if [ "$i" -lt 5 ]; then
+            if [ "$i" -lt 4 ]; then
               echo ""
               echo "60초 후 다시 확인합니다."
               sleep 60
