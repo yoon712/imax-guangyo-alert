@@ -41,8 +41,8 @@ jobs:
           MOVIE_TITLE: "오디세이"
           SCREEN_KEYWORD: "IMAX"
 
-          START_DATE: "2026-08-31"
-          LOOKAHEAD_DAYS: "14"
+          START_DATE: "2026-09-01"
+          LOOKAHEAD_DAYS: "6"
 
         run: |
           python monitor_cgv.py
