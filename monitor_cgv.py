@@ -1,16 +1,23 @@
 import os
-import re
 import json
 import hashlib
 from pathlib import Path
-from datetime import date, timedelta
-import requests
-from playwright.sync_api import sync_playwright
+from datetime import datetime, timedelta
 
-TARGET_URL = os.getenv("TARGET_URL", "https://cgv.co.kr/cnm/movieBook/cinema?siteNm=%EA%B4%91%EA%B5%90&siteNo=0257")
+import requests
+from curl_cffi import requests as cffi_requests
+
+
+# ============================================================
+# 설정
+# ============================================================
+
+SITE_NO = os.getenv("SITE_NO", "0257")          # CGV 광교
+SITE_NAME = os.getenv("SITE_NAME", "광교")
+
 MOVIE_TITLE = os.getenv("MOVIE_TITLE", "오디세이")
-THEATER_KEYWORD = os.getenv("THEATER_KEYWORD", "광교")
 SCREEN_KEYWORD = os.getenv("SCREEN_KEYWORD", "IMAX")
+
 START_DATE = os.getenv("START_DATE", "2026-08-31")
 LOOKAHEAD_DAYS = int(os.getenv("LOOKAHEAD_DAYS", "14"))
 
@@ -19,135 +26,453 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
-STATE_FILE = CACHE_DIR / "last_state.txt"
-DEBUG_FILE = CACHE_DIR / "last_page.txt"
 
-def build_date_labels(start_date_str, days):
-    y, m, d = map(int, start_date_str.split("-"))
-    start = date(y, m, d)
-    labels = set()
+STATE_FILE = CACHE_DIR / "last_state.json"
+DEBUG_FILE = CACHE_DIR / "last_result.json"
 
-    for i in range(days):
-        cur = start + timedelta(days=i)
-        mm = cur.month
-        dd = cur.day
 
-        # 페이지에 여러 포맷으로 보일 수 있으니 넉넉하게
-        labels.add(f"{mm}.{dd}")
-        labels.add(f"{mm}/{dd}")
-        labels.add(f"{mm}-{dd}")
-        labels.add(f"{mm:02d}.{dd:02d}")
-        labels.add(f"{mm:02d}/{dd:02d}")
-        labels.add(f"{mm:02d}-{dd:02d}")
-        labels.add(f"{cur.year}.{mm}.{dd}")
-        labels.add(f"{cur.year}-{mm:02d}-{dd:02d}")
+# ============================================================
+# 날짜 생성
+# ============================================================
 
-    return labels
+def get_dates():
+    start = datetime.strptime(START_DATE, "%Y-%m-%d")
 
-def normalize_text(text: str) -> str:
-    text = text.replace("\u00a0", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n+", "\n", text)
-    return text.strip()
+    return [
+        (start + timedelta(days=i)).strftime("%Y%m%d")
+        for i in range(LOOKAHEAD_DAYS)
+    ]
 
-def fetch_rendered_text(url: str) -> str:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(8000)  # 동적 로딩 여유
-        text = page.locator("body").inner_text()
-        browser.close()
-    return text
 
-def extract_candidate_lines(text: str):
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    out = []
-    for line in lines:
-        if (
-            MOVIE_TITLE in line
-            or SCREEN_KEYWORD.lower() in line.lower()
-            or THEATER_KEYWORD in line
-        ):
-            out.append(line)
-    return out
+# ============================================================
+# CGV API 조회
+# ============================================================
 
-def is_match(full_text: str, candidate_lines: list[str], date_labels: set[str]):
-    text_ok = (
-        THEATER_KEYWORD in full_text
-        and MOVIE_TITLE in full_text
-        and SCREEN_KEYWORD.lower() in full_text.lower()
-    )
+def fetch_schedule(date_str):
+    """
+    CGV 웹사이트가 사용하는 극장별 시간표 API 호출
+    """
 
-    date_hit = any(label in full_text for label in date_labels)
+    url = "https://cgv.co.kr/cnm/atkt/searchMovScnInfo"
 
-    # 조금 더 보수적으로, 후보 줄에도 영화명이 있어야 함
-    movie_line_exists = any(MOVIE_TITLE in line for line in candidate_lines)
+    params = {
+        "coCd": "A420",
+        "siteNo": SITE_NO,
+        "scnYmd": date_str,
+        "rtctlScopCd": "08",
+    }
 
-    return text_ok and date_hit and movie_line_exists
+    print()
+    print("======================================")
+    print(f"조회 날짜: {date_str}")
+    print("======================================")
 
-def send_telegram(message: str):
-    if not BOT_TOKEN or not CHAT_ID:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 가 필요합니다.")
+    try:
+        response = cffi_requests.get(
+            url,
+            params=params,
+            impersonate="chrome",
+            timeout=30,
+        )
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": message,
-        "disable_notification": "false",
-    }, timeout=30)
-    resp.raise_for_status()
+        print("HTTP:", response.status_code)
+        print("URL :", response.url)
 
-def load_last_state():
-    if STATE_FILE.exists():
-        return STATE_FILE.read_text(encoding="utf-8").strip()
+        if response.status_code != 200:
+            print("CGV 응답 오류")
+            print(response.text[:500])
+            return []
+
+        try:
+            payload = response.json()
+        except Exception:
+            print("JSON 파싱 실패")
+            print(response.text[:1000])
+            return []
+
+        print("statusCode:", payload.get("statusCode"))
+
+        data = payload.get("data")
+
+        if not isinstance(data, list):
+            print("data가 리스트가 아님")
+            print(json.dumps(payload, ensure_ascii=False)[:1500])
+            return []
+
+        print("전체 회차 수:", len(data))
+
+        return data
+
+    except Exception as e:
+        print("CGV 조회 예외:", repr(e))
+        return []
+
+
+# ============================================================
+# 회차 정보 정리
+# ============================================================
+
+def first_value(item, keys):
+    for key in keys:
+        value = item.get(key)
+
+        if value not in (None, ""):
+            return str(value)
+
     return ""
 
-def save_state(state: str):
-    STATE_FILE.write_text(state, encoding="utf-8")
+
+def normalize_show(item, date_str):
+
+    movie = first_value(
+        item,
+        [
+            "movNm",
+            "movieNm",
+            "movieName",
+        ],
+    )
+
+    start_time = first_value(
+        item,
+        [
+            "scnsrtTm",
+            "scnSrtTm",
+            "startTime",
+        ],
+    )
+
+    end_time = first_value(
+        item,
+        [
+            "scnendTm",
+            "scnEndTm",
+            "endTime",
+        ],
+    )
+
+    hall = first_value(
+        item,
+        [
+            "scnsrtNm",
+            "scrnNm",
+            "screenNm",
+            "theaterNm",
+            "hallNm",
+        ],
+    )
+
+    screen_type = first_value(
+        item,
+        [
+            "scrnKindNm",
+            "screenTypeNm",
+            "spclHallNm",
+            "roomTypeNm",
+        ],
+    )
+
+    remaining = first_value(
+        item,
+        [
+            "frSeatCnt",
+            "remainSeatCnt",
+            "availableSeatCnt",
+        ],
+    )
+
+    total = first_value(
+        item,
+        [
+            "stcnt",
+            "seatCnt",
+            "totalSeatCnt",
+        ],
+    )
+
+    # CGV 응답 필드가 변해도 IMAX라는 값이 다른 필드에
+    # 들어 있을 수 있으므로 JSON 전체도 검색한다.
+    raw_text = json.dumps(
+        item,
+        ensure_ascii=False,
+    )
+
+    return {
+        "date": date_str,
+        "movie": movie,
+        "start": start_time,
+        "end": end_time,
+        "hall": hall,
+        "screen_type": screen_type,
+        "remaining": remaining,
+        "total": total,
+        "raw": raw_text,
+    }
+
+
+# ============================================================
+# 오디세이 + IMAX 검색
+# ============================================================
+
+def find_matches():
+
+    matches = []
+    debug = {}
+
+    for date_str in get_dates():
+
+        rows = fetch_schedule(date_str)
+
+        debug[date_str] = rows
+
+        for row in rows:
+
+            show = normalize_show(row, date_str)
+
+            movie_match = (
+                MOVIE_TITLE.lower()
+                in show["movie"].lower()
+            )
+
+            imax_match = (
+                SCREEN_KEYWORD.lower()
+                in show["raw"].lower()
+            )
+
+            if movie_match and imax_match:
+
+                matches.append(show)
+
+                print()
+                print("★★★★★ MATCH ★★★★★")
+                print("영화:", show["movie"])
+                print("날짜:", show["date"])
+                print("시간:", show["start"])
+                print("상영관:", show["hall"])
+                print("타입:", show["screen_type"])
+                print(
+                    "좌석:",
+                    show["remaining"],
+                    "/",
+                    show["total"],
+                )
+
+    DEBUG_FILE.write_text(
+        json.dumps(
+            debug,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    return matches
+
+
+# ============================================================
+# Telegram
+# ============================================================
+
+def send_telegram(text):
+
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN secret 없음"
+        )
+
+    if not CHAT_ID:
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID secret 없음"
+        )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage"
+    )
+
+    response = requests.post(
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": text,
+        },
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+
+# ============================================================
+# 기존 상태
+# ============================================================
+
+def load_state():
+
+    if not STATE_FILE.exists():
+        return []
+
+    try:
+        return json.loads(
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+
+    except Exception:
+        return []
+
+
+def save_state(state):
+
+    STATE_FILE.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+# ============================================================
+# 비교용 ID
+# ============================================================
+
+def show_id(show):
+
+    source = "|".join(
+        [
+            show["date"],
+            show["movie"],
+            show["start"],
+            show["hall"],
+            show["screen_type"],
+        ]
+    )
+
+    return hashlib.sha256(
+        source.encode("utf-8")
+    ).hexdigest()
+
+
+# ============================================================
+# 실행
+# ============================================================
 
 def main():
-    date_labels = build_date_labels(START_DATE, LOOKAHEAD_DAYS)
 
-    full_text = fetch_rendered_text(TARGET_URL)
-    full_text = normalize_text(full_text)
-    DEBUG_FILE.write_text(full_text, encoding="utf-8")
+    print("CGV 감시 시작")
+    print("극장:", SITE_NAME, SITE_NO)
+    print("영화:", MOVIE_TITLE)
+    print("상영관:", SCREEN_KEYWORD)
+    print(
+        "기간:",
+        START_DATE,
+        "~",
+        LOOKAHEAD_DAYS,
+        "일",
+    )
 
-    candidate_lines = extract_candidate_lines(full_text)
+    matches = find_matches()
 
-    found = is_match(full_text, candidate_lines, date_labels)
+    print()
+    print("==============================")
+    print("총 매칭 회차:", len(matches))
+    print("==============================")
 
-    relevant_text = "\n".join(candidate_lines[:50])
-    state_source = json.dumps({
-        "found": found,
-        "relevant_text": relevant_text,
-    }, ensure_ascii=False)
+    previous = load_state()
 
-    state_hash = hashlib.sha256(state_source.encode("utf-8")).hexdigest()
-    last_state = load_last_state()
+    previous_ids = set(
+        item["id"]
+        for item in previous
+        if "id" in item
+    )
 
-    print("=== TARGET_URL ===")
-    print(TARGET_URL)
-    print("=== FOUND ===")
-    print(found)
-    print("=== CANDIDATE LINES ===")
-    print(relevant_text if relevant_text else "(none)")
+    current_state = []
 
-    if found and state_hash != last_state:
-        message = (
-            f"🎬 CGV 알림\n"
-            f"- 극장: {THEATER_KEYWORD}\n"
-            f"- 영화: {MOVIE_TITLE}\n"
-            f"- 상영관: {SCREEN_KEYWORD}\n"
-            f"- 기준일: {START_DATE} 이후\n\n"
-            f"예매 페이지를 바로 확인해봐:\n{TARGET_URL}"
+    new_matches = []
+
+    for show in matches:
+
+        sid = show_id(show)
+
+        current_state.append({
+            "id": sid,
+            **show,
+        })
+
+        if sid not in previous_ids:
+            new_matches.append(show)
+
+    # 최초 실행인데 이미 회차가 있는 경우도
+    # 테스트할 수 있게 로그 출력
+    if matches:
+
+        print()
+        print("현재 확인된 회차")
+
+        for show in matches:
+
+            print(
+                show["date"],
+                show["start"],
+                show["movie"],
+                show["hall"],
+                show["remaining"],
+            )
+
+    if new_matches:
+
+        lines = [
+            "🚨 CGV 광교 IMAX 예매 감지",
+            "",
+            f"영화: {MOVIE_TITLE}",
+        ]
+
+        for show in new_matches:
+
+            d = datetime.strptime(
+                show["date"],
+                "%Y%m%d",
+            ).strftime("%m/%d")
+
+            line = (
+                f"{d} "
+                f"{show['start']} "
+                f"{show['hall']}"
+            )
+
+            if show["remaining"]:
+                line += (
+                    f" | 잔여 "
+                    f"{show['remaining']}석"
+                )
+
+            lines.append(line)
+
+        lines.append("")
+        lines.append(
+            "CGV 앱에서 바로 확인하세요."
         )
-        send_telegram(message)
-        print("Telegram alert sent.")
-    else:
-        print("No new alert.")
 
-    save_state(state_hash)
+        send_telegram(
+            "\n".join(lines)
+        )
+
+        print()
+        print(
+            "Telegram 알림 전송 완료"
+        )
+
+    else:
+
+        print()
+        print(
+            "새로운 회차 없음"
+        )
+
+    save_state(current_state)
+
 
 if __name__ == "__main__":
     main()
