@@ -379,7 +379,6 @@ def main():
     )
 
     current_state = []
-
     new_matches = []
 
     for show in matches:
@@ -394,78 +393,74 @@ def main():
         if sid not in previous_ids:
             new_matches.append(show)
 
-    # 최초 실행인데 이미 회차가 있는 경우도
-    # 테스트할 수 있게 로그 출력
     if matches:
 
         print()
-        print("현재 확인된 회차")
+        print("현재 확인된 IMAX 회차")
 
         for show in matches:
-
             print(
                 show["date"],
                 show["start"],
                 show["movie"],
                 show["hall"],
                 show["remaining"],
+                show["imax_fields"],
             )
 
-if new_matches:
+    if new_matches:
 
-    lines = [
-        "🚨 CGV 광교 IMAX 예매 감지",
-        "",
-        f"영화: {MOVIE_TITLE}",
-        "",
-    ]
+        lines = [
+            "🚨 CGV 광교 IMAX 예매 감지",
+            "",
+            f"영화: {MOVIE_TITLE}",
+            "",
+        ]
 
-    for show in new_matches:
+        for show in new_matches:
 
-        d = datetime.strptime(
-            show["date"],
-            "%Y%m%d",
-        ).strftime("%m/%d")
+            d = datetime.strptime(
+                show["date"],
+                "%Y%m%d",
+            ).strftime("%m/%d")
 
-        time_text = show["start"]
+            time_text = show["start"]
 
-        if len(time_text) == 4:
-            time_text = (
-                time_text[:2]
-                + ":"
-                + time_text[2:]
+            if len(time_text) == 4:
+                time_text = (
+                    time_text[:2]
+                    + ":"
+                    + time_text[2:]
+                )
+
+            line = (
+                f"{d} "
+                f"{time_text} "
+                f"{show['hall']}"
             )
 
-        line = (
-            f"{d} "
-            f"{time_text} "
-            f"{show['hall']}"
+            if show["remaining"]:
+                line += (
+                    f" | 잔여 "
+                    f"{show['remaining']}석"
+                )
+
+            lines.append(line)
+
+        lines.append("")
+        lines.append("CGV 앱에서 바로 확인하세요.")
+
+        send_telegram(
+            "\n".join(lines)
         )
 
-        if show["remaining"]:
-            line += (
-                f" | 잔여 "
-                f"{show['remaining']}석"
-            )
+        print()
+        print("Telegram 알림 전송 완료")
 
-        lines.append(line)
+    else:
 
-    lines.append("")
-    lines.append(
-        "CGV 앱에서 바로 확인하세요."
-    )
-
-    send_telegram(
-        "\n".join(lines)
-    )
-
-    print()
-    print("Telegram 알림 전송 완료")
-
-else:
-
-    print()
-    print("새로운 회차 없음")
+        print()
+        print("새로운 회차 없음")
 
     save_state(current_state)
 
