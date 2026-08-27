@@ -33,7 +33,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run CGV monitor
+      - name: Monitor CGV every minute
         env:
 
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -51,7 +51,23 @@ jobs:
           END_DATE: "2026-09-06"
 
         run: |
-          python monitor_cgv.py
+          for i in 1 2 3 4 5
+          do
+
+            echo ""
+            echo "=========================================="
+            echo "CGV 체크 $i / 5"
+            echo "=========================================="
+
+            python monitor_cgv.py
+
+            if [ "$i" -lt 5 ]; then
+              echo ""
+              echo "60초 후 다시 확인합니다."
+              sleep 60
+            fi
+
+          done
 
       - name: Save monitor state
         run: |
