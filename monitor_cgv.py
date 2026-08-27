@@ -53,7 +53,7 @@ def fetch_schedule(date_str):
     CGV 웹사이트가 사용하는 극장별 시간표 API 호출
     """
 
-    url = "https://cgv.co.kr/cnm/atkt/searchMovScnInfo"
+    url = "https://api.cgv.co.kr/cnm/atkt/searchMovScnInfo"
 
     params = {
         "coCd": "A420",
