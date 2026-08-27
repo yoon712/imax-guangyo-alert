@@ -129,6 +129,8 @@ def normalize_show(item, date_str):
         item,
         [
             "movNm",
+            "expoProdNm",
+            "prodNm",
             "movieNm",
             "movieName",
         ],
@@ -152,10 +154,12 @@ def normalize_show(item, date_str):
         ],
     )
 
+    # 실제 CGV API에서는 scnsNm 사용
     hall = first_value(
         item,
         [
-            "scnsrtNm",
+            "scnsNm",
+            "expoScnsNm",
             "scrnNm",
             "screenNm",
             "theaterNm",
@@ -163,20 +167,11 @@ def normalize_show(item, date_str):
         ],
     )
 
-    screen_type = first_value(
-        item,
-        [
-            "scrnKindNm",
-            "screenTypeNm",
-            "spclHallNm",
-            "roomTypeNm",
-        ],
-    )
-
     remaining = first_value(
         item,
         [
             "frSeatCnt",
+            "frtmpSeatCnt",
             "remainSeatCnt",
             "availableSeatCnt",
         ],
@@ -186,17 +181,20 @@ def normalize_show(item, date_str):
         item,
         [
             "stcnt",
+            "cpSeatCnt",
             "seatCnt",
             "totalSeatCnt",
         ],
     )
 
-    # CGV 응답 필드가 변해도 IMAX라는 값이 다른 필드에
-    # 들어 있을 수 있으므로 JSON 전체도 검색한다.
-    raw_text = json.dumps(
-        item,
-        ensure_ascii=False,
-    )
+    # 이 회차 데이터 중 IMAX가 들어있는 필드를 전부 찾음
+    imax_fields = {}
+
+    for key, value in item.items():
+        if value is not None and "imax" in str(value).lower():
+            imax_fields[key] = str(value)
+
+    is_imax = bool(imax_fields)
 
     return {
         "date": date_str,
@@ -204,13 +202,12 @@ def normalize_show(item, date_str):
         "start": start_time,
         "end": end_time,
         "hall": hall,
-        "screen_type": screen_type,
         "remaining": remaining,
         "total": total,
-        "raw": raw_text,
+        "is_imax": is_imax,
+        "imax_fields": imax_fields,
     }
-
-
+    
 # ============================================================
 # 오디세이 + IMAX 검색
 # ============================================================
@@ -340,7 +337,6 @@ def show_id(show):
             show["movie"],
             show["start"],
             show["hall"],
-            show["screen_type"],
         ]
     )
 
@@ -430,11 +426,20 @@ def main():
                 "%Y%m%d",
             ).strftime("%m/%d")
 
-            line = (
-                f"{d} "
-                f"{show['start']} "
-                f"{show['hall']}"
-            )
+            time_text = show["start"]
+
+            if len(time_text) == 4:
+                time_text = (
+                    time_text[:2]
+                    + ":"
+                    + time_text[2:]
+    )
+
+line = (
+        f"{d} "
+        f"{time_text} "
+        f"{show['hall']}"
+)
 
             if show["remaining"]:
                 line += (
