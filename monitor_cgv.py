@@ -49,11 +49,7 @@ def get_dates():
 # ============================================================
 
 def fetch_schedule(date_str):
-    """
-    CGV 웹사이트가 사용하는 극장별 시간표 API 호출
-    """
-
-    url = "https://api.cgv.co.kr/cnm/atkt/searchMovScnInfo"
+    url = "https://cgv.co.kr/api/v1/booking/searchMovScnInfo"
 
     params = {
         "coCd": "A420",
@@ -72,6 +68,10 @@ def fetch_schedule(date_str):
             url,
             params=params,
             impersonate="chrome",
+            headers={
+                "Accept": "application/json",
+                "Referer": "https://cgv.co.kr/cnm/movieBook/cinema",
+            },
             timeout=30,
         )
 
@@ -80,33 +80,34 @@ def fetch_schedule(date_str):
 
         if response.status_code != 200:
             print("CGV 응답 오류")
-            print(response.text[:500])
+            print(response.text[:1000])
             return []
 
         try:
             payload = response.json()
         except Exception:
             print("JSON 파싱 실패")
-            print(response.text[:1000])
+            print(response.text[:1500])
             return []
 
-        print("statusCode:", payload.get("statusCode"))
+        print("응답 미리보기:")
+        print(json.dumps(payload, ensure_ascii=False)[:2000])
 
         data = payload.get("data")
 
-        if not isinstance(data, list):
-            print("data가 리스트가 아님")
-            print(json.dumps(payload, ensure_ascii=False)[:1500])
-            return []
+        if isinstance(data, list):
+            print("전체 회차 수:", len(data))
+            return data
 
-        print("전체 회차 수:", len(data))
+        # 응답 구조 확인용
+        print("data가 리스트가 아님")
+        print(json.dumps(payload, ensure_ascii=False, indent=2)[:3000])
 
-        return data
+        return []
 
     except Exception as e:
         print("CGV 조회 예외:", repr(e))
         return []
-
 
 # ============================================================
 # 회차 정보 정리
