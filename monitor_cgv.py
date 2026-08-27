@@ -1,6 +1,5 @@
 import os
 import json
-import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -9,46 +8,59 @@ from curl_cffi import requests as cffi_requests
 
 
 # ============================================================
-# 설정
+# 기본 설정
 # ============================================================
 
-SITE_NO = os.getenv("SITE_NO", "0257")          # CGV 광교
+SITE_NO = os.getenv("SITE_NO", "0257")
 SITE_NAME = os.getenv("SITE_NAME", "광교")
 
+MOVIE_NO = os.getenv("MOVIE_NO", "30001323")
 MOVIE_TITLE = os.getenv("MOVIE_TITLE", "오디세이")
+
 SCREEN_KEYWORD = os.getenv("SCREEN_KEYWORD", "IMAX")
 
-START_DATE = os.getenv("START_DATE", "2026-08-31")
-LOOKAHEAD_DAYS = int(os.getenv("LOOKAHEAD_DAYS", "14"))
+START_DATE = os.getenv("START_DATE", "2026-09-01")
+END_DATE = os.getenv("END_DATE", "2026-09-06")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+
+# ============================================================
+# 상태 저장 폴더
+# ============================================================
 
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
 STATE_FILE = CACHE_DIR / "last_state.json"
-DEBUG_FILE = CACHE_DIR / "last_result.json"
 
 
 # ============================================================
-# 날짜 생성
+# 날짜 목록
 # ============================================================
 
-def get_dates():
+def get_target_dates():
     start = datetime.strptime(START_DATE, "%Y-%m-%d")
+    end = datetime.strptime(END_DATE, "%Y-%m-%d")
 
-    return [
-        (start + timedelta(days=i)).strftime("%Y%m%d")
-        for i in range(LOOKAHEAD_DAYS)
-    ]
+    dates = []
+
+    current = start
+
+    while current <= end:
+        dates.append(current.strftime("%Y%m%d"))
+        current += timedelta(days=1)
+
+    return dates
 
 
 # ============================================================
-# CGV API 조회
+# CGV 시간표 API
 # ============================================================
 
 def fetch_schedule(date_str):
+
     url = "https://cgv.co.kr/api/v1/booking/searchMovScnInfo"
 
     params = {
@@ -58,411 +70,487 @@ def fetch_schedule(date_str):
         "rtctlScopCd": "08",
     }
 
-    print()
-    print("======================================")
-    print(f"조회 날짜: {date_str}")
-    print("======================================")
+    headers = {
+        "Accept": "application/json",
+        "Referer": "https://cgv.co.kr/cnm/movieBook/cinema",
+    }
 
-    try:
-        response = cffi_requests.get(
-            url,
-            params=params,
-            impersonate="chrome",
-            headers={
-                "Accept": "application/json",
-                "Referer": "https://cgv.co.kr/cnm/movieBook/cinema",
-            },
-            timeout=30,
+    print()
+    print("==================================================")
+    print("조회 날짜:", date_str)
+    print("==================================================")
+
+    response = cffi_requests.get(
+        url,
+        params=params,
+        headers=headers,
+        impersonate="chrome",
+        timeout=30,
+    )
+
+    print("HTTP:", response.status_code)
+    print("URL :", response.url)
+
+    if response.status_code != 200:
+        print("CGV API 호출 실패")
+        print(response.text[:1000])
+
+        raise RuntimeError(
+            f"CGV API HTTP {response.status_code}"
         )
 
-        print("HTTP:", response.status_code)
-        print("URL :", response.url)
-
-        if response.status_code != 200:
-            print("CGV 응답 오류")
-            print(response.text[:1000])
-            return []
-
-        try:
-            payload = response.json()
-        except Exception:
-            print("JSON 파싱 실패")
-            print(response.text[:1500])
-            return []
-
-        print("응답 미리보기:")
-        print(json.dumps(payload, ensure_ascii=False)[:2000])
-
-        data = payload.get("data")
-
-        if isinstance(data, list):
-            print("전체 회차 수:", len(data))
-            return data
-
-        # 응답 구조 확인용
-        print("data가 리스트가 아님")
-        print(json.dumps(payload, ensure_ascii=False, indent=2)[:3000])
-
-        return []
+    try:
+        payload = response.json()
 
     except Exception as e:
-        print("CGV 조회 예외:", repr(e))
-        return []
+        print("JSON 파싱 실패")
+        print(response.text[:1500])
+
+        raise RuntimeError(
+            "CGV 응답 JSON 파싱 실패"
+        ) from e
+
+    status_code = payload.get("statusCode")
+
+    print("CGV statusCode:", status_code)
+
+    if status_code != 0:
+        print(
+            "CGV statusMessage:",
+            payload.get("statusMessage")
+        )
+
+        raise RuntimeError(
+            "CGV API statusCode 오류"
+        )
+
+    data = payload.get("data", [])
+
+    if not isinstance(data, list):
+        raise RuntimeError(
+            "CGV API data 형식이 예상과 다름"
+        )
+
+    print("전체 회차 수:", len(data))
+
+    return data
+
 
 # ============================================================
-# 회차 정보 정리
+# 시간 표시
 # ============================================================
 
-def first_value(item, keys):
-    for key in keys:
-        value = item.get(key)
+def format_time(value):
 
-        if value not in (None, ""):
-            return str(value)
+    value = str(value or "")
 
-    return ""
+    if len(value) == 4:
+        return f"{value[:2]}:{value[2:]}"
+
+    return value
 
 
-def normalize_show(item, date_str):
+# ============================================================
+# CGV 한 회차 정보 정리
+# ============================================================
 
-    movie = first_value(
-        item,
-        [
-            "movNm",
-            "expoProdNm",
-            "prodNm",
-            "movieNm",
-            "movieName",
-        ],
-    )
-
-    start_time = first_value(
-        item,
-        [
-            "scnsrtTm",
-            "scnSrtTm",
-            "startTime",
-        ],
-    )
-
-    end_time = first_value(
-        item,
-        [
-            "scnendTm",
-            "scnEndTm",
-            "endTime",
-        ],
-    )
-
-    # 실제 CGV API에서는 scnsNm 사용
-    hall = first_value(
-        item,
-        [
-            "scnsNm",
-            "expoScnsNm",
-            "scrnNm",
-            "screenNm",
-            "theaterNm",
-            "hallNm",
-        ],
-    )
-
-    remaining = first_value(
-        item,
-        [
-            "frSeatCnt",
-            "frtmpSeatCnt",
-            "remainSeatCnt",
-            "availableSeatCnt",
-        ],
-    )
-
-    total = first_value(
-        item,
-        [
-            "stcnt",
-            "cpSeatCnt",
-            "seatCnt",
-            "totalSeatCnt",
-        ],
-    )
-
-    # 이 회차 데이터 중 IMAX가 들어있는 필드를 전부 찾음
-    imax_fields = {}
-
-    for key, value in item.items():
-        if value is not None and "imax" in str(value).lower():
-            imax_fields[key] = str(value)
-
-    is_imax = bool(imax_fields)
+def normalize_show(row):
 
     return {
-        "date": date_str,
-        "movie": movie,
-        "start": start_time,
-        "end": end_time,
-        "hall": hall,
-        "remaining": remaining,
-        "total": total,
-        "is_imax": is_imax,
-        "imax_fields": imax_fields,
+        "date": str(
+            row.get("scnYmd", "")
+        ),
+
+        "movie_no": str(
+            row.get("movNo", "")
+        ),
+
+        "movie": str(
+            row.get("movNm")
+            or row.get("expoProdNm")
+            or row.get("prodNm")
+            or ""
+        ),
+
+        "screen_no": str(
+            row.get("scnsNo", "")
+        ),
+
+        "screen": str(
+            row.get("scnsNm")
+            or row.get("expoScnsNm")
+            or ""
+        ),
+
+        "sequence": str(
+            row.get("scnSseq", "")
+        ),
+
+        "start": str(
+            row.get("scnsrtTm", "")
+        ),
+
+        "end": str(
+            row.get("scnendTm", "")
+        ),
+
+        "remaining": str(
+            row.get("frSeatCnt", "")
+        ),
+
+        "total": str(
+            row.get("stcnt", "")
+        ),
     }
-    
+
+
 # ============================================================
-# 오디세이 + IMAX 검색
+# 우리가 원하는 회차인지 판별
+# ============================================================
+
+def is_target_show(show):
+
+    movie_match = (
+        show["movie_no"] == MOVIE_NO
+        or show["movie"] == MOVIE_TITLE
+    )
+
+    imax_match = (
+        SCREEN_KEYWORD.lower()
+        in show["screen"].lower()
+    )
+
+    return movie_match and imax_match
+
+
+# ============================================================
+# 고유 회차 ID
+# ============================================================
+
+def get_show_id(show):
+
+    return "|".join(
+        [
+            show["date"],
+            show["movie_no"],
+            show["screen_no"],
+            show["sequence"],
+            show["start"],
+        ]
+    )
+
+
+# ============================================================
+# 대상 IMAX 회차 찾기
 # ============================================================
 
 def find_matches():
 
     matches = []
-    debug = {}
 
-    for date_str in get_dates():
+    for date_str in get_target_dates():
 
         rows = fetch_schedule(date_str)
 
-        debug[date_str] = rows
-
         for row in rows:
 
-            show = normalize_show(row, date_str)
+            show = normalize_show(row)
 
-            movie_match = (
-                MOVIE_TITLE.lower()
-                in show["movie"].lower()
+            if not is_target_show(show):
+                continue
+
+            show["id"] = get_show_id(show)
+
+            matches.append(show)
+
+            print()
+            print("★★★★★ IMAX MATCH ★★★★★")
+            print("영화:", show["movie"])
+            print("날짜:", show["date"])
+            print(
+                "시간:",
+                format_time(show["start"])
+            )
+            print("상영관:", show["screen"])
+            print(
+                "좌석:",
+                show["remaining"],
+                "/",
+                show["total"],
+            )
+            print(
+                "회차 ID:",
+                show["id"],
             )
 
-            imax_match = show["is_imax"]
+    return matches
 
-            if movie_match and imax_match:
 
-                matches.append(show)
+# ============================================================
+# 기존 상태 읽기
+# ============================================================
 
-                print()
-                print("★★★★★ MATCH ★★★★★")
-                print("영화:", show["movie"])
-                print("날짜:", show["date"])
-                print("시간:", show["start"])
-                print("상영관:", show["hall"])
-                print("타입:", show["screen_type"])
-                print("좌석:", show["remaining"], "/", show["total"])
-                print("IMAX 판별 필드:", show["imax_fields"])
+def load_state():
 
-    DEBUG_FILE.write_text(
+    if not STATE_FILE.exists():
+        return None
+
+    try:
+
+        data = json.loads(
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        if not isinstance(data, dict):
+            return None
+
+        return data
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# 상태 저장
+# ============================================================
+
+def save_state(seen_ids):
+
+    data = {
+        "seen_ids": sorted(seen_ids),
+    }
+
+    STATE_FILE.write_text(
         json.dumps(
-            debug,
+            data,
             ensure_ascii=False,
             indent=2,
         ),
         encoding="utf-8",
     )
 
-    return matches
-
 
 # ============================================================
-# Telegram
+# Telegram 전송
 # ============================================================
 
-def send_telegram(text):
+def send_telegram(message):
 
-    if not BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN secret 없음"
+            "TELEGRAM_BOT_TOKEN이 없습니다."
         )
 
-    if not CHAT_ID:
+    if not TELEGRAM_CHAT_ID:
         raise RuntimeError(
-            "TELEGRAM_CHAT_ID secret 없음"
+            "TELEGRAM_CHAT_ID가 없습니다."
         )
 
     url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
     response = requests.post(
         url,
         data={
-            "chat_id": CHAT_ID,
-            "text": text,
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "disable_notification": "false",
         },
-        timeout=20,
+        timeout=30,
+    )
+
+    print(
+        "Telegram HTTP:",
+        response.status_code,
     )
 
     response.raise_for_status()
 
 
 # ============================================================
-# 기존 상태
+# Telegram 메시지 작성
 # ============================================================
 
-def load_state():
+def build_alert_message(new_matches):
 
-    if not STATE_FILE.exists():
-        return []
+    lines = [
+        "🚨 CGV 광교 IMAX 예매 오픈 감지",
+        "",
+        f"영화: {MOVIE_TITLE}",
+        "",
+    ]
 
-    try:
-        return json.loads(
-            STATE_FILE.read_text(
-                encoding="utf-8"
-            )
-        )
-
-    except Exception:
-        return []
-
-
-def save_state(state):
-
-    STATE_FILE.write_text(
-        json.dumps(
-            state,
-            ensure_ascii=False,
-            indent=2,
+    new_matches = sorted(
+        new_matches,
+        key=lambda x: (
+            x["date"],
+            x["start"],
         ),
-        encoding="utf-8",
     )
 
+    for show in new_matches:
 
-# ============================================================
-# 비교용 ID
-# ============================================================
-
-def show_id(show):
-
-    source = "|".join(
-        [
+        date_text = datetime.strptime(
             show["date"],
-            show["movie"],
-            show["start"],
-            show["hall"],
+            "%Y%m%d",
+        ).strftime("%m/%d")
+
+        time_text = format_time(
+            show["start"]
+        )
+
+        line = (
+            f"{date_text} "
+            f"{time_text} "
+            f"{show['screen']}"
+        )
+
+        if show["remaining"]:
+            line += (
+                f" | 잔여 "
+                f"{show['remaining']}석"
+            )
+
+        lines.append(line)
+
+    lines.extend(
+        [
+            "",
+            "CGV 앱에서 바로 확인하세요.",
         ]
     )
 
-    return hashlib.sha256(
-        source.encode("utf-8")
-    ).hexdigest()
+    return "\n".join(lines)
 
 
 # ============================================================
-# 실행
+# 메인
 # ============================================================
 
 def main():
 
     print("CGV 감시 시작")
+    print("------------------------------")
     print("극장:", SITE_NAME, SITE_NO)
-    print("영화:", MOVIE_TITLE)
+    print(
+        "영화:",
+        MOVIE_TITLE,
+        f"({MOVIE_NO})",
+    )
     print("상영관:", SCREEN_KEYWORD)
     print(
         "기간:",
         START_DATE,
         "~",
-        LOOKAHEAD_DAYS,
-        "일",
+        END_DATE,
     )
+    print("------------------------------")
 
     matches = find_matches()
 
     print()
-    print("==============================")
-    print("총 매칭 회차:", len(matches))
-    print("==============================")
+    print("==================================================")
+    print("현재 IMAX 매칭 회차:", len(matches))
+    print("==================================================")
 
-    previous = load_state()
+    current_ids = {
+        show["id"]
+        for show in matches
+    }
 
-    previous_ids = set(
-        item["id"]
-        for item in previous
-        if "id" in item
-    )
+    state = load_state()
 
-    current_state = []
-    new_matches = []
+    # --------------------------------------------------------
+    # 최초 실행
+    #
+    # 현재 열려 있는 회차를 baseline으로만 저장한다.
+    # 따라서 이미 열린 9/1 회차 때문에 알림이 울리지 않는다.
+    # --------------------------------------------------------
 
-    for show in matches:
-
-        sid = show_id(show)
-
-        current_state.append({
-            "id": sid,
-            **show,
-        })
-
-        if sid not in previous_ids:
-            new_matches.append(show)
-
-    if matches:
+    if state is None:
 
         print()
-        print("현재 확인된 IMAX 회차")
+        print("최초 실행입니다.")
+        print(
+            "현재 회차를 기준 상태로 저장합니다."
+        )
 
-        for show in matches:
-            print(
-                show["date"],
-                show["start"],
-                show["movie"],
-                show["hall"],
-                show["remaining"],
-                show["imax_fields"],
-            )
+        save_state(current_ids)
+
+        print(
+            "기존 회차에 대한 Telegram 알림은 보내지 않습니다."
+        )
+
+        return
+
+    seen_ids = set(
+        state.get(
+            "seen_ids",
+            []
+        )
+    )
+
+    new_matches = [
+        show
+        for show in matches
+        if show["id"] not in seen_ids
+    ]
+
+    print()
+    print(
+        "이전에 확인한 회차:",
+        len(seen_ids),
+    )
+
+    print(
+        "새로 발견한 회차:",
+        len(new_matches),
+    )
+
+    # --------------------------------------------------------
+    # 새 IMAX 회차 발견
+    # --------------------------------------------------------
 
     if new_matches:
 
-        lines = [
-            "🚨 CGV 광교 IMAX 예매 감지",
-            "",
-            f"영화: {MOVIE_TITLE}",
-            "",
-        ]
+        print()
+        print("🚨 새로운 IMAX 회차 발견")
 
         for show in new_matches:
 
-            d = datetime.strptime(
+            print(
                 show["date"],
-                "%Y%m%d",
-            ).strftime("%m/%d")
-
-            time_text = show["start"]
-
-            if len(time_text) == 4:
-                time_text = (
-                    time_text[:2]
-                    + ":"
-                    + time_text[2:]
-                )
-
-            line = (
-                f"{d} "
-                f"{time_text} "
-                f"{show['hall']}"
+                format_time(show["start"]),
+                show["screen"],
             )
 
-            if show["remaining"]:
-                line += (
-                    f" | 잔여 "
-                    f"{show['remaining']}석"
-                )
-
-            lines.append(line)
-
-        lines.append("")
-        lines.append("CGV 앱에서 바로 확인하세요.")
-
-        send_telegram(
-            "\n".join(lines)
+        message = build_alert_message(
+            new_matches
         )
 
+        send_telegram(message)
+
         print()
-        print("Telegram 알림 전송 완료")
+        print(
+            "Telegram 알림 전송 완료"
+        )
 
     else:
 
         print()
-        print("새로운 회차 없음")
+        print(
+            "새로운 IMAX 회차 없음"
+        )
 
-    save_state(current_state)
+    # 지금까지 본 회차를 누적 저장
+    seen_ids.update(current_ids)
+
+    save_state(seen_ids)
 
 
 if __name__ == "__main__":
