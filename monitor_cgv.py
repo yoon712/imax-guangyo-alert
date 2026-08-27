@@ -235,10 +235,7 @@ def find_matches():
                 in show["movie"].lower()
             )
 
-            imax_match = (
-                SCREEN_KEYWORD.lower()
-                in show["raw"].lower()
-            )
+            imax_match = show["is_imax"]
 
             if movie_match and imax_match:
 
@@ -251,12 +248,8 @@ def find_matches():
                 print("시간:", show["start"])
                 print("상영관:", show["hall"])
                 print("타입:", show["screen_type"])
-                print(
-                    "좌석:",
-                    show["remaining"],
-                    "/",
-                    show["total"],
-                )
+                print("좌석:", show["remaining"], "/", show["total"])
+                print("IMAX 판별 필드:", show["imax_fields"])
 
     DEBUG_FILE.write_text(
         json.dumps(
