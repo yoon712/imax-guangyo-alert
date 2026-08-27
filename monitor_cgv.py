@@ -411,64 +411,61 @@ def main():
                 show["remaining"],
             )
 
-    if new_matches:
+if new_matches:
 
-        lines = [
-            "🚨 CGV 광교 IMAX 예매 감지",
-            "",
-            f"영화: {MOVIE_TITLE}",
-        ]
+    lines = [
+        "🚨 CGV 광교 IMAX 예매 감지",
+        "",
+        f"영화: {MOVIE_TITLE}",
+        "",
+    ]
 
-        for show in new_matches:
+    for show in new_matches:
 
-            d = datetime.strptime(
-                show["date"],
-                "%Y%m%d",
-            ).strftime("%m/%d")
+        d = datetime.strptime(
+            show["date"],
+            "%Y%m%d",
+        ).strftime("%m/%d")
 
-            time_text = show["start"]
+        time_text = show["start"]
 
-            if len(time_text) == 4:
-                time_text = (
-                    time_text[:2]
-                    + ":"
-                    + time_text[2:]
+        if len(time_text) == 4:
+            time_text = (
+                time_text[:2]
+                + ":"
+                + time_text[2:]
+            )
+
+        line = (
+            f"{d} "
+            f"{time_text} "
+            f"{show['hall']}"
+        )
+
+        if show["remaining"]:
+            line += (
+                f" | 잔여 "
+                f"{show['remaining']}석"
+            )
+
+        lines.append(line)
+
+    lines.append("")
+    lines.append(
+        "CGV 앱에서 바로 확인하세요."
     )
 
-line = (
-        f"{d} "
-        f"{time_text} "
-        f"{show['hall']}"
-)
+    send_telegram(
+        "\n".join(lines)
+    )
 
-            if show["remaining"]:
-                line += (
-                    f" | 잔여 "
-                    f"{show['remaining']}석"
-                )
+    print()
+    print("Telegram 알림 전송 완료")
 
-            lines.append(line)
+else:
 
-        lines.append("")
-        lines.append(
-            "CGV 앱에서 바로 확인하세요."
-        )
-
-        send_telegram(
-            "\n".join(lines)
-        )
-
-        print()
-        print(
-            "Telegram 알림 전송 완료"
-        )
-
-    else:
-
-        print()
-        print(
-            "새로운 회차 없음"
-        )
+    print()
+    print("새로운 회차 없음")
 
     save_state(current_state)
 
