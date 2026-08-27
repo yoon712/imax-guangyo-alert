@@ -3,16 +3,20 @@ name: cgv-gwanggyo-imax-alert
 on:
   schedule:
     - cron: "*/10 * * * *"
+
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+
   monitor:
+
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -21,30 +25,44 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python packages
-        run: pip install -r requirements.txt
-
-      - name: Install Playwright browser
-        run: python -m playwright install --with-deps chromium
+      - name: Install packages
+        run: |
+          pip install -r requirements.txt
 
       - name: Run monitor
         env:
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TARGET_URL: "https://cgv.co.kr/cnm/movieBook/cinema?siteNm=%EA%B4%91%EA%B5%90&siteNo=0257"
+
+          SITE_NO: "0257"
+          SITE_NAME: "광교"
+
           MOVIE_TITLE: "오디세이"
-          THEATER_KEYWORD: "광교"
           SCREEN_KEYWORD: "IMAX"
+
           START_DATE: "2026-08-31"
           LOOKAHEAD_DAYS: "14"
-        run: python monitor_cgv.py
+
+        run: |
+          python monitor_cgv.py
 
       - name: Commit state
         run: |
+
           if [[ -n "$(git status --porcelain .cache)" ]]; then
+
             git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
             git add .cache
-            git commit -m "Update CGV monitor state" || exit 0
+
+            git commit \
+            -m "Update CGV monitor state" \
+            || exit 0
+
             git push
+
           fi
